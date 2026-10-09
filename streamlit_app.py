@@ -76,22 +76,35 @@ client, MODELO, EMB_MODELO = conectar()
 
 # MODO WEB (BUSCA + FONTES)
 
-def responder_web(pergunta):                                                     # faz a pergunta com busca na web, config e o pacote de instrucoes que vai junto com a pergunta, contem a persona,
-    config = types.GenerateContentConfig(                                        # para ele responder como seu assistente e liga a ferramenta de busca na internet.  
+def historico_recente(n=6):
+    msgs = st.session_state.get("historico", [])[:-1][-n:]                           # monta um resumo das ultimas conversas, para mandar junto com a pergunta nova.
+    linhas = []
+    for m in msgs:
+        quem = "Usuario" if m["role"] == "user" else "Assistente"
+        linhas.append(f"{quem}: {m['content']}")
+    return "\n".join(linhas)
+
+def responder_web(pergunta):
+    contexto = historico_recente()                                                                 # junta o historico com a pergunta nova, pro modelo lembrar do que ja foi dito, e tambem pra ele nao repetir a resposta que ja deu antes. Se nao tiver historico, so manda a pergunta nova.
+    entrada = pergunta
+    if contexto:
+        entrada = f"Conversa ate agora:\n{contexto}\n\nNova pergunta: {pergunta}"
+
+    config = types.GenerateContentConfig(
         system_instruction=PERSONA,
         tools=[types.Tool(google_search=types.GoogleSearch())],
     )
-    for _ in range(3):                                                                                   
-        try:
-            return client.models.generate_content(model=MODELO, contents=pergunta, config=config)
-        except Exception:
-            time.sleep(3)                                                                                   # tenta 3 vezes, se a resposta vier de primeira, o return ja devolve e encerra,
-    config2 = types.GenerateContentConfig(system_instruction=PERSONA)                                       # se a API estiver ocupada e der erro, ele espera 3 segundos e tenta denovo
     for _ in range(3):
         try:
-            return client.models.generate_content(model=MODELO, contents=pergunta, config=config2)   
+            return client.models.generate_content(model=MODELO, contents=entrada, config=config)
         except Exception:
-            time.sleep(3)     
+            time.sleep(3)
+    config2 = types.GenerateContentConfig(system_instruction=PERSONA)
+    for _ in range(3):
+        try:
+            return client.models.generate_content(model=MODELO, contents=entrada, config=config2)
+        except Exception:
+            time.sleep(3)
     return None
 
 
@@ -170,16 +183,20 @@ def indexar_pdf(conteudo_bytes):                                                
     return pedacos, embed(pedacos)
 
 
-def responder_doc(pergunta, documentos, vetores, k=2):                                 # responde com base no PDF (o RAG acontecendo)
-    emb_pergunta = embed([pergunta])[0]                                                # vira numeros
-    notas = [similaridade(emb_pergunta, v) for v in vetores]                           # compara a pergunta com cada pedaco do documento, gerando uma nota pra cada
-    melhores = np.argsort(notas)[::-1][:k]                                             # ele acha os 2 pedacos mais parecidos com a pergunta, k2 = os 2 melhores, 
-    trechos = [documentos[i] for i in melhores]
+def responder_doc(pergunta, documentos, vetores, k=2):
+    emb_pergunta = embed([pergunta])[0]
+    notas = [similaridade(emb_pergunta, v) for v in vetores]
+    melhores = np.argsort(notas)[::-1][:k]
+    trechos = [documentos[i] for i in melhores]                                       # adiciona o historico da conversa pro contexto, mas mantem a regra de ouro: responder so com base nos trechos do documento.
     contexto = "\n\n".join(trechos)
-                                                                                       # junta esses trechos no contexto e monta o prompt, damos a persona, os trechos encontrados e a ordem clara: "responda com base nesses trechos, se nao estiver neles diga nao encontrei isso no documento"
+    conversa = historico_recente()
+
     prompt = f"""{PERSONA}
-                                                                            
-Responda a pergunta usando SOMENTE os trechos do documento abaixo.                         
+
+Historico recente da conversa (apenas para contexto):
+{conversa}
+
+Responda a pergunta usando SOMENTE os trechos do documento abaixo.
 Se a resposta nao estiver neles, responda: "Nao encontrei isso no documento."
 
 Trechos:
@@ -190,10 +207,10 @@ Pergunta: {pergunta}"""
     for _ in range(5):
         try:
             resposta = client.models.generate_content(model=MODELO, contents=prompt).text
-            return resposta, trechos [0]
+            return resposta, trechos[0]
         except Exception:
             time.sleep(4)
-    return "A API esta ocupada agora, tente de novo em instantes.", trechos[0]   
+    return "A API esta ocupada agora, tente de novo em instantes.", trechos[0]  
 
 
 # INTERFACE PARTE 1: BARRA LATERAL
